@@ -1,0 +1,56 @@
+name: ARM64 Linux (ROM-independent)
+
+# Manual only. This workflow validates that the ROM-independent portion of
+# the project - the fzero_video static library and its ROM-free unit tests
+# (fzero_hdma, fzero_video, fzero_mode7, fzero_hotkeys, fzero_state_mode) -
+# configures, builds, and passes its tests on aarch64 (the CPU architecture
+# used by Anbernic H700-chip handhelds such as the RG34XX family).
+#
+# IMPORTANT - what this workflow does NOT do:
+# It does NOT and CANNOT produce a playable FZeroSNESRecomp game binary.
+# That requires FZERO_BUILD_GAME=ON, which in turn requires:
+#   1. The snesrecomp and recomp-ui submodules (checked out here only so
+#      CMake's ROM-independent path still configures cleanly; the game
+#      target itself is never requested).
+#   2. A maintainer's own legally dumped F-Zero (USA) ROM staged as
+#      fzero.sfc at the repo root, processed locally with
+#      `bash tools/regen.sh` to produce the private src/gen/*.c sources.
+# Neither of those can or should exist in a public CI runner, so building
+# the actual game for aarch64 is a local (or self-hosted-runner) task for
+# whoever owns the ROM. See README.md's "PortMaster / Anbernic H700 (muOS)"
+# section and tools/package_portmaster.sh for that workflow.
+on:
+  workflow_dispatch:
+
+jobs:
+  build-rom-independent:
+    name: Build + test fzero_video on aarch64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build
+
+      - name: Configure (FZERO_BUILD_GAME=OFF)
+        # No ROM and no submodules are needed for this configuration: the
+        # CMakeLists.txt returns right after declaring the fzero_video
+        # library and its tests when FZERO_BUILD_GAME is OFF, before it
+        # ever looks for snesrecomp/recomp-ui or src/gen.
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFZERO_BUILD_GAME=OFF
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
