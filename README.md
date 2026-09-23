@@ -231,6 +231,126 @@ On Linux, `xvfb-run -a python3 tests/test_appimage_rom_persistence.py
 AppImage through the real zenity picker, then Play/quit and repeated relaunches.
 It requires `zenity` and `xdotool`; use a fresh output directory for each run.
 
+## PortMaster / Anbernic H700 (muOS)
+
+Experimental packaging for Anbernic H700-chip handhelds - the RG34XX,
+RG34XX H, and RG34XXSP family - running muOS, installed as a PortMaster
+port. **This has not been tested on real hardware.** Everything below was
+built and reasoned about on a desktop machine with no H700 device
+available; please try it and report back what does and doesn't work.
+
+### What's verified and what isn't
+
+Verified in this repository's CI and locally on x86_64:
+
+- The ROM-independent `fzero_video` library and its unit tests
+  (`fzero_hdma`, `fzero_video`, `fzero_mode7`, `fzero_hotkeys`,
+  `fzero_state_mode`) configure, build, and pass with
+  `-DFZERO_BUILD_GAME=OFF` on `ubuntu-24.04-arm` (aarch64) in
+  [`.github/workflows/arm64-linux.yml`](.github/workflows/arm64-linux.yml),
+  matching the H700's CPU architecture. This does not need the
+  `snesrecomp`/`recomp-ui` submodules or a ROM.
+- `FzeroCalculateViewport()` (`src/fzero_video.c`) already derives the
+  correct aspect ratio from whatever window size it's given, clamped
+  between 4:3 and 32:9. At the RG34XX family's native 720x480 panel
+  (720/480 = 1.5, i.e. 3:2) that clamp is a no-op, so a fullscreen launch
+  with the default `Aspect=Fit` setting renders at the panel's real 3:2
+  aspect ratio with no source changes. This was checked by reading the
+  formula, not by rendering on a real panel.
+
+**Not verified - cannot be, from this environment:**
+
+- Building the actual `FZeroSNESRecomp` game binary for aarch64. That
+  needs `FZERO_BUILD_GAME=ON`, the `snesrecomp`/`recomp-ui` submodules, and
+  a maintainer's own legally dumped ROM run through `tools/regen.sh` to
+  produce `src/gen/*.c` - none of which can exist in a public CI runner or
+  this sandbox. It has to be built locally (or on a self-hosted runner) by
+  someone who owns the ROM, on or for aarch64.
+- Anything about actually running on an RG34XX/muOS: window creation,
+  controller mapping, audio, performance, and the video driver PortMaster
+  picks at runtime.
+- **The GPU/driver path.** `src/sdl_main.c` requests an OpenGL **3.3
+  core** context (`SDL_GL_CONTEXT_MAJOR/MINOR_VERSION` = 3/3) and hard-fails
+  (`ogl_IsVersionGEQ(3, 3)`) if it doesn't get one - but only on the path
+  used when a custom GLSL shader preset is selected in Settings > Display.
+  The H700's Mali-G31 runs Mesa's Panfrost driver, whose desktop OpenGL
+  ceiling is currently **3.1** - below what that shader path requires.
+  With no shader selected (the default the packaged config below ships
+  with), the game instead uses SDL's own `SDL_Renderer` path
+  (`snesrecomp_sdl_create_renderer`), which does not force a 3.3 core
+  context and should be compatible with Panfrost. **Practical takeaway:
+  leave Shader set to None on this handheld** - selecting a custom shader
+  is expected to fail to initialize on this GPU/driver combination.
+
+### Building and packaging
+
+You need your own legally dumped F-Zero (USA) ROM and an aarch64 build
+environment (the RG34XX family is Cortex-A55, so an aarch64 host or a
+cross-compiling toolchain both work).
+
+**Automated (recommended):** run
+[`.github/workflows/self-hosted-package.yml`](.github/workflows/self-hosted-package.yml)
+from the Actions tab - it does everything below for you and uploads the
+finished zip as a run artifact. It requires a **self-hosted runner you
+register and control**, since the ROM has to stay on hardware you own and
+can never touch GitHub-hosted infrastructure; see
+[`docs/self-hosted-runner.md`](docs/self-hosted-runner.md) for one-time
+setup (Docker + QEMU on a regular x86_64 PC works fine, emulating aarch64).
+This workflow has not been run for real (no self-hosted runner or ROM was
+available to test it from this environment) - the commands below are the
+same ones it runs, if you'd rather follow them by hand first or something
+needs debugging.
+
+**Manual:**
+
+```bash
+bash tools/bootstrap.sh                 # snesrecomp + recomp-ui submodules
+# stage your verified ROM as fzero.sfc, then:
+bash tools/regen.sh
+cmake -S . -B build-portmaster -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-portmaster --target FZeroSNESRecomp -j"$(nproc)"
+bash tools/package_portmaster.sh --build build-portmaster
+```
+
+This produces `release-portmaster/FZeroSNESRecomp-portmaster-<version>.zip`,
+laid out the way PortMaster expects (verified against
+[PortsMaster/PortMaster-New](https://github.com/PortsMaster/PortMaster-New)'s
+own published ports): `port.json` and `FZeroSNESRecomp.sh` at the zip root,
+alongside an `FZeroSNESRecomp/` folder holding the binary, its assets, and
+a default `config.ini` / `fzero-video.ini` with `Fullscreen=1` and
+`Aspect=Fit` already set, so a first launch is already fullscreen and
+correctly 3:2 without visiting the Settings menu first. The tracked
+sources for the launcher script and metadata live under
+[`portmaster/`](portmaster/); `tools/package_portmaster.sh` only copies
+them together with a build you already produced - it does not build
+anything itself.
+
+### Installing on muOS
+
+1. Copy the zip's contents onto the SD card's PortMaster ports folder
+   (typically `SD1:/roms/ports` under muOS), or install it through muOS's
+   own PortMaster app if you're distributing it that way -
+   [see muOS's PortMaster docs](https://muos.dev/) for the app-based flow.
+2. Drop your own `F-Zero (USA).sfc`/`.smc` ROM into the
+   `FZeroSNESRecomp/` folder that was installed.
+3. Launch **F-Zero SNES Recomp** from muOS's Ports list.
+
+The launcher script (`portmaster/FZeroSNESRecomp.sh`) mirrors the ROM
+auto-detection the official Linux AppImage already uses
+(`tools/build-linux.sh`'s `AppRun`): it looks for a `.sfc`/`.smc` file
+next to the binary and caches its path in `rom.cfg`, the same file the
+game's own launcher UI reads. It deliberately does not hardcode
+`SDL_VIDEODRIVER`, since real PortMaster ports disagree on the right
+default for muOS (some force `x11`, some force `kmsdrm`, some only
+override for a detected vendor `mali` driver) and which is correct here
+cannot be checked without the actual device; the script has a commented
+override for either, with the reasoning, if you hit a black screen.
+
+**This is untested on real hardware - please report issues** (ideally with
+`FZeroSNESRecomp/log.txt` from the port's folder attached) so the launcher
+script, default config, and this section can be corrected against what an
+actual RG34XX/muOS setup does.
+
 ## License
 
 MIT License, Copyright (c) 2026 Matthew Stanley. See `LICENSE`. Bundled dependencies keep their own licenses under `licenses/` in each release; BS F-Zero Deluxe content is included with its authors' permission and is not covered by this license.

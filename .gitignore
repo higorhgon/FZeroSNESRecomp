@@ -4,6 +4,7 @@
 /release-stage/
 /release-linux/
 /release-macos*/
+/release-portmaster/
 
 # ROM files (copyrighted; never commit or redistribute).
 *.smc
